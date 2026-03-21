@@ -23,6 +23,7 @@ type Store struct {
 	mu       sync.RWMutex
 	indexes  map[string][]IndexEntry
 	sstables []string
+	blooms   map[string]*BloomFilters
 }
 
 type IndexEntry struct {
@@ -48,6 +49,7 @@ func NewStore() (*Store, error) {
 		mu:       sync.RWMutex{},
 		indexes:  make(map[string][]IndexEntry),
 		sstables: []string{},
+		blooms:   make(map[string]*BloomFilters),
 	}
 
 	err = s.Replay()
@@ -128,6 +130,12 @@ func (s *Store) LoadSSTables() error {
 			}
 			file.Close()
 			s.indexes[filename] = index
+
+			bf := NewBloomFilter(len(index), 0.01)
+			for _, entry := range index {
+				bf.Add(entry.Key)
+			}
+			s.blooms[filename] = bf
 		}
 	}
 	sort.Strings(s.sstables)
@@ -147,6 +155,7 @@ func (s *Store) Set(key, value string) error {
 
 	s.wal.Write(bytes)
 	s.wal.WriteString("\n")
+	s.wal.Sync()
 
 	s.memtable.Insert(key, value)
 
@@ -203,10 +212,17 @@ func (s *Store) Delete(key string) error {
 
 	s.memtable.Insert(key, TOMBSTONE)
 
+	if s.memtable.Size >= MEMTABLE_SIZE {
+		return s.Flush()
+	}
+
 	return nil
 }
 
 func (s *Store) Flush() error {
+
+	bf := NewBloomFilter(s.memtable.Size, 0.01)
+
 	filename := fmt.Sprintf("sst-%d.db", len(s.sstables))
 	file, err := os.Create(filename)
 	if err != nil {
@@ -224,6 +240,9 @@ func (s *Store) Flush() error {
 			Key:    iter.Key(),
 			Offset: currentOffset,
 		})
+
+		bf.Add(iter.Key())
+
 		line := fmt.Sprintf("%s,%s\n", iter.Key(), iter.Value())
 
 		n, err := file.WriteString(line)
@@ -234,6 +253,7 @@ func (s *Store) Flush() error {
 		currentOffset += int64(n)
 	}
 	s.indexes[filename] = index
+	s.blooms[filename] = bf
 	s.sstables = append(s.sstables, filename)
 
 	fmt.Printf("Flushed %s with index size %d\n", filename, len(index))
@@ -250,6 +270,13 @@ func (s *Store) Flush() error {
 }
 
 func (s *Store) SearchSSTables(key, filename string) (string, bool) {
+
+	if bf, ok := s.blooms[filename]; ok {
+		if !bf.MightContain(key) {
+			return "", false
+		}
+	}
+
 	index, ok := s.indexes[filename]
 	if !ok {
 		return "", false

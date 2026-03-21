@@ -47,11 +47,11 @@ func (s *Store) Compaction() error {
 		parts := strings.SplitN(line, ",", 2)
 		if len(parts) == 2 {
 
-			key, val := parts[0], parts[1]
+			key, _ := parts[0], parts[1]
 
-			if val == TOMBSTONE {
-				return
-			}
+			// if val == TOMBSTONE {
+			// 	return
+			// }
 
 			index = append(index, IndexEntry{Key: key, Offset: currentOffset})
 
@@ -101,8 +101,18 @@ func (s *Store) Compaction() error {
 	s.sstables = append([]string{newName}, s.sstables[2:]...)
 
 	s.indexes[newName] = index
+
+	bf := NewBloomFilter(len(index), 0.01)
+	for _, entry := range index {
+		bf.Add(entry.Key)
+	}
+
+	s.blooms[newName] = bf
+
 	delete(s.indexes, fileA)
 	delete(s.indexes, fileB)
+	delete(s.blooms, fileA)
+	delete(s.blooms, fileB)
 
 	os.Remove(fileA)
 	os.Remove(fileB)
