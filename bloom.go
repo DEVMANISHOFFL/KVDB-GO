@@ -53,7 +53,6 @@ func (bf *BloomFilters) Add(key string) {
 		arrayIndex := bitPosition / 64
 		bitOffset := bitPosition % 64
 
-		// CRITICAL FIX: Explicitly cast 1 to uint64 before shifting
 		bf.bitset[arrayIndex] |= (uint64(1) << bitOffset)
 	}
 }

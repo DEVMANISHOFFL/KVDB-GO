@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"sort"
@@ -17,13 +18,19 @@ const (
 	WAL_FILE      = "wal.log"
 )
 
-type Store struct {
+type Partition struct {
+	id       int
 	wal      *os.File
 	memtable *Skiplist
 	mu       sync.RWMutex
 	indexes  map[string][]IndexEntry
 	sstables []string
 	blooms   map[string]*BloomFilters
+}
+
+type Store struct {
+	partitions []*Partition
+	numShards  int
 }
 
 type IndexEntry struct {
@@ -37,13 +44,20 @@ type LogEntry struct {
 	Value string
 }
 
-func NewStore() (*Store, error) {
-	file, err := os.OpenFile(WAL_FILE, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0664)
+func getPartitionID(key string, numPartitions int) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32()) % numPartitions
+}
+
+func NewPartition(id int) (*Partition, error) {
+	walName := fmt.Sprintf("wal-%d.log", id)
+	file, err := os.OpenFile(walName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0664)
 	if err != nil {
 		return nil, err
 	}
-
-	s := &Store{
+	p := &Partition{
+		id:       id,
 		wal:      file,
 		memtable: NewSkiplist(),
 		mu:       sync.RWMutex{},
@@ -51,19 +65,32 @@ func NewStore() (*Store, error) {
 		sstables: []string{},
 		blooms:   make(map[string]*BloomFilters),
 	}
-
-	err = s.Replay()
-	if err != nil {
-		fmt.Println("error replaying log")
+	if err := p.Replay(); err != nil {
+		fmt.Printf("Partiotion %d: Error replaying WAL\n", id)
 	}
-	err = s.LoadSSTables()
-	if err != nil {
-		fmt.Println("error loading sstables")
+	if err := p.LoadSSTables(); err != nil {
+		fmt.Printf("Partition %d: Error loading SSTables\n", id)
+	}
+	return p, nil
+}
+
+func NewStore(numShards int) (*Store, error) {
+	s := &Store{
+		partitions: make([]*Partition, numShards),
+		numShards:  numShards,
+	}
+
+	for i := range numShards {
+		p, err := NewPartition(i)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create partition %d; %v", i, err)
+		}
+		s.partitions[i] = p
 	}
 	return s, nil
 }
 
-func (s *Store) Replay() error {
+func (s *Partition) Replay() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -89,7 +116,7 @@ func (s *Store) Replay() error {
 	return scanner.Err()
 }
 
-func (s *Store) LoadSSTables() error {
+func (s *Partition) LoadSSTables() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,7 +126,8 @@ func (s *Store) LoadSSTables() error {
 	}
 
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "sst-") && strings.HasSuffix(e.Name(), ".db") {
+		prefix := fmt.Sprintf("sst-p%d", s.id)
+		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(e.Name(), ".db") {
 			filename := e.Name()
 			s.sstables = append(s.sstables, filename)
 
@@ -143,6 +171,21 @@ func (s *Store) LoadSSTables() error {
 }
 
 func (s *Store) Set(key, value string) error {
+	partitionID := getPartitionID(key, s.numShards)
+	return s.partitions[partitionID].Set(key, value)
+}
+
+func (s *Store) Get(key string) (string, bool) {
+	partitionID := getPartitionID(key, s.numShards)
+	return s.partitions[partitionID].Get(key)
+}
+
+func (s *Store) Delete(key string) error {
+	partitionID := getPartitionID(key, s.numShards)
+	return s.partitions[partitionID].Delete(key)
+}
+
+func (s *Partition) Set(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -165,7 +208,7 @@ func (s *Store) Set(key, value string) error {
 	return nil
 }
 
-func (s *Store) Get(key string) (string, bool) {
+func (s *Partition) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -175,7 +218,7 @@ func (s *Store) Get(key string) (string, bool) {
 			return "", false
 		}
 
-		return val, true
+		return val, ok
 	}
 	for i := len(s.sstables) - 1; i >= 0; i-- {
 		val, ok := s.SearchSSTables(key, s.sstables[i])
@@ -189,7 +232,7 @@ func (s *Store) Get(key string) (string, bool) {
 	return "", false
 }
 
-func (s *Store) Delete(key string) error {
+func (s *Partition) Delete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -219,11 +262,11 @@ func (s *Store) Delete(key string) error {
 	return nil
 }
 
-func (s *Store) Flush() error {
+func (s *Partition) Flush() error {
 
 	bf := NewBloomFilter(s.memtable.Size, 0.01)
 
-	filename := fmt.Sprintf("sst-%d.db", len(s.sstables))
+	filename := fmt.Sprintf("sst-p%d-%d.db", s.id, len(s.sstables))
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -269,7 +312,7 @@ func (s *Store) Flush() error {
 	return err
 }
 
-func (s *Store) SearchSSTables(key, filename string) (string, bool) {
+func (s *Partition) SearchSSTables(key, filename string) (string, bool) {
 
 	if bf, ok := s.blooms[filename]; ok {
 		if !bf.MightContain(key) {
@@ -318,63 +361,4 @@ func (s *Store) SearchSSTables(key, filename string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func main() {
-	// Nuke old state for a clean run
-	os.Remove("wal.log")
-	entries, _ := os.ReadDir(".")
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".db") || strings.HasSuffix(e.Name(), ".tmp") {
-			os.Remove(e.Name())
-		}
-	}
-
-	s, err := NewStore()
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("--- Writing Batch 1 (Forces Flush 1) ---")
-	s.Set("user:1", "Alice")
-	s.Set("user:2", "Bob")
-	s.Set("user:3", "Charlie") // Memtable hits 3 -> Flushes to sst-0.db
-
-	fmt.Println("\n--- Writing Batch 2 (Forces Flush 2) ---")
-	s.Set("user:4", "Dave")
-	s.Set("user:2", "Bob_V2") // Overwrite older value
-	s.Delete("user:1")        // Tombstone older value
-	s.Set("user:5", "Eve")    // Memtable hits 3 -> Flushes to sst-1.db
-
-	fmt.Printf("\nBefore Compaction, SSTables count: %d\n", len(s.sstables))
-
-	fmt.Println("\n--- Triggering Compaction ---")
-	if err := s.Compaction(); err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("\nAfter Compaction, SSTables count: %d\n", len(s.sstables))
-
-	fmt.Println("\n--- Verifying Data ---")
-
-	// user:1 should be gone completely
-	if val, ok := s.Get("user:1"); ok {
-		fmt.Printf("FAIL: user:1 should be deleted, got '%s'\n", val)
-	} else {
-		fmt.Println("OK: user:1 is successfully deleted")
-	}
-
-	// user:2 should be the newer version
-	if val, ok := s.Get("user:2"); ok {
-		fmt.Printf("OK: user:2 is '%s'\n", val)
-	} else {
-		fmt.Println("FAIL: user:2 not found")
-	}
-
-	// user:3 should be untouched from the first batch
-	if val, ok := s.Get("user:3"); ok {
-		fmt.Printf("OK: user:3 is '%s'\n", val)
-	} else {
-		fmt.Println("FAIL: user:3 not found")
-	}
 }

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func (s *Store) Compaction() error {
+func (s *Partition) Compaction() error {
 	s.mu.RLock()
 
 	if len(s.sstables) < 2 {
@@ -95,7 +95,7 @@ func (s *Store) Compaction() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	newName := fmt.Sprintf("sst-compacted-%d.db", time.Now().UnixNano())
+	newName := fmt.Sprintf("sst-p%d-compacted-%d.db", s.id, time.Now().UnixNano())
 	os.Rename(tempName, newName)
 
 	s.sstables = append([]string{newName}, s.sstables[2:]...)
