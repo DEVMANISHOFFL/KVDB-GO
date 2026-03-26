@@ -120,3 +120,21 @@ func (s *Partition) Compaction() error {
 	fmt.Printf("[Compaction] Finished. Created %s. Dropped %s and %s\n", newName, fileA, fileB)
 	return nil
 }
+
+func (p *Partition) StartCompactionWorker(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		for range ticker.C {
+			p.mu.RLock()
+			needsCompaction := len(p.sstables) >= 2
+			p.mu.RUnlock()
+
+			if needsCompaction {
+				err := p.Compaction()
+				if err != nil {
+					fmt.Printf("[Partition %d] Compaction error: %v\n", p.id, err)
+				}
+			}
+		}
+	}()
+}

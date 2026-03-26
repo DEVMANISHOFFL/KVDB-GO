@@ -10,50 +10,47 @@ const (
 	probability = 0.5
 )
 
-type Skiplist struct {
-	Head  *Node
-	Level int
-	rng   *rand.Rand
-	Size  int
-}
-
 type Node struct {
 	Key   string
 	Value string
 	Next  []*Node
 }
 
+type Skiplist struct {
+	Head  *Node
+	rng   *rand.Rand
+	Level int
+	Size  int
+}
+
 func NewSkiplist() *Skiplist {
 	src := rand.NewSource(time.Now().UnixNano())
 	return &Skiplist{
 		Head:  &Node{Next: make([]*Node, maxLevel)},
-		Level: 0,
 		rng:   rand.New(src),
+		Level: 0,
+		Size:  0,
 	}
 }
 
 func (sl *Skiplist) RandomLevel() int {
 	lvl := 0
-	for sl.rng.Float64() < 0.5 && lvl < maxLevel-1 {
+	for sl.rng.Float64() < probability && lvl <= maxLevel-1 {
 		lvl++
 	}
 	return lvl
 }
 
 func (sl *Skiplist) Insert(key, value string) {
-
 	update := make([]*Node, maxLevel)
 	current := sl.Head
 
 	for i := sl.Level; i >= 0; i-- {
-
 		for current.Next[i] != nil && current.Next[i].Key < key {
 			current = current.Next[i]
 		}
-
 		update[i] = current
 	}
-
 	current = current.Next[0]
 
 	if current != nil && current.Key == key {
@@ -64,11 +61,9 @@ func (sl *Skiplist) Insert(key, value string) {
 	lvl := sl.RandomLevel()
 
 	if lvl > sl.Level {
-
 		for i := sl.Level + 1; i <= lvl; i++ {
 			update[i] = sl.Head
 		}
-
 		sl.Level = lvl
 	}
 
@@ -82,9 +77,9 @@ func (sl *Skiplist) Insert(key, value string) {
 		newNode.Next[i] = update[i].Next[i]
 		update[i].Next[i] = newNode
 	}
-
 	sl.Size++
 }
+
 func (sl *Skiplist) Search(key string) (string, bool) {
 	current := sl.Head
 
@@ -98,6 +93,7 @@ func (sl *Skiplist) Search(key string) (string, bool) {
 		return current.Value, true
 	}
 	return "", false
+
 }
 
 type Iterator struct {

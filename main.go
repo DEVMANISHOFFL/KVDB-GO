@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -71,6 +72,9 @@ func NewPartition(id int) (*Partition, error) {
 	if err := p.LoadSSTables(); err != nil {
 		fmt.Printf("Partition %d: Error loading SSTables\n", id)
 	}
+
+	p.StartCompactionWorker(5 * time.Second)
+
 	return p, nil
 }
 
@@ -361,4 +365,16 @@ func (s *Partition) SearchSSTables(key, filename string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func main() {
+	store, err := NewStore(4)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to initiate database: %v", err))
+	}
+
+	server := NewHTTPServer(store, 8080)
+	if err := server.Start(); err != nil {
+		panic(fmt.Sprintf("Server crashed: %v", err))
+	}
 }
